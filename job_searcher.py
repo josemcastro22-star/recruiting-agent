@@ -13,6 +13,13 @@ import time
 import sys
 import json
 from datetime import datetime
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
+from reportlab.lib.utils import simpleSplit
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -106,27 +113,23 @@ COMPANIES = [
     },
     {
         "name": "Broward County Gov",    "hq": "Fort Lauderdale, FL",
-        "type": "scrape",
+        "type": "neogov",                "neogov_agency": "broward",
         "career_url": "https://www.governmentjobs.com/careers/broward",
-        "search_url": "https://www.governmentjobs.com/careers/broward?keywords=cybersecurity+IT+analyst",
     },
     {
         "name": "City of Fort Lauderdale", "hq": "Fort Lauderdale, FL",
-        "type": "scrape",
+        "type": "neogov",                "neogov_agency": "ftlauderdale",
         "career_url": "https://www.governmentjobs.com/careers/ftlauderdale",
-        "search_url": "https://www.governmentjobs.com/careers/ftlauderdale?keywords=cybersecurity+IT",
     },
     {
         "name": "City of Boca Raton",    "hq": "Boca Raton, FL",
-        "type": "scrape",
+        "type": "neogov",                "neogov_agency": "bocaraton",
         "career_url": "https://www.governmentjobs.com/careers/bocaraton",
-        "search_url": "https://www.governmentjobs.com/careers/bocaraton?keywords=IT+analyst+cybersecurity",
     },
     {
         "name": "Palm Beach County Gov", "hq": "West Palm Beach, FL",
-        "type": "scrape",
+        "type": "neogov",                "neogov_agency": "palmbeach",
         "career_url": "https://www.governmentjobs.com/careers/palmbeach",
-        "search_url": "https://www.governmentjobs.com/careers/palmbeach?keywords=cybersecurity+IT+analyst",
     },
 ]
 
@@ -243,11 +246,27 @@ def check_greenhouse(company: dict) -> tuple[list[dict], str | None]:
     error_message is None on success.
     """
     slug = company["slug"]
-    url  = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+    # Try new endpoint first, fall back to legacy
+    urls = [
+        f"https://job-boards.greenhouse.io/v1/boards/{slug}/jobs?content=true",
+        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
+    ]
     print(f"  → Greenhouse API ({slug})")
 
+    r, url = None, urls[0]
+    for candidate in urls:
+        try:
+            r = fetch(candidate)
+            url = candidate
+            break
+        except FetchError as e:
+            if "404" in str(e):
+                continue  # try next endpoint
+            return [], str(e)
+    if r is None:
+        return [], f"HTTP 404 on both Greenhouse endpoints — slug '{slug}' may be wrong"
+
     try:
-        r    = fetch(url)
         data = safe_parse_json(r, url)
     except FetchError as e:
         hint = " — Check the slug in COMPANIES list." if "404" in str(e) else ""
@@ -442,6 +461,52 @@ def check_smartrecruiters(company: dict) -> tuple[list[dict], str | None]:
     return matches, None
 
 
+def check_neogov(company: dict) -> tuple[list[dict], str | None]:
+    """Query NeoGov/GovernmentJobs JSON API for government agency job listings."""
+    agency = company["neogov_agency"]
+    # NeoGov exposes a JSON endpoint for each agency
+    url = f"https://www.governmentjobs.com/careers/{agency}/jobs/search.json?keyword=cybersecurity+IT+analyst+automation+python&category=Information+Technology"
+    print(f"  → NeoGov API ({agency})")
+
+    try:
+        r    = fetch(url)
+        data = safe_parse_json(r, url)
+    except FetchError as e:
+        return [], str(e)
+
+    if data is None:
+        return [], "Response was not valid JSON"
+
+    # NeoGov returns {"JobListings": [...]} or a list directly
+    if isinstance(data, dict):
+        jobs = data.get("JobListings", data.get("jobListings", []))
+    elif isinstance(data, list):
+        jobs = data
+    else:
+        return [], f"Unexpected NeoGov response shape: {type(data).__name__}"
+
+    matches, seen = [], set()
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        title    = job.get("JobTitle", job.get("jobTitle", ""))
+        location = job.get("Location", job.get("location", company["hq"]))
+        job_id   = job.get("JobId", job.get("jobId", ""))
+        link     = f"{company['career_url']}/job/{job_id}" if job_id else company["career_url"]
+
+        if not title:
+            continue
+        dedup_key = (title.lower(), location.lower())
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        if is_relevant(title, location):
+            matches.append(make_job(company, title, location, link))
+
+    return matches, None
+
+
 def check_scrape(company: dict) -> tuple[list[dict], str | None]:
     """
     Fetches search URL, looks for keyword hits in raw HTML.
@@ -492,6 +557,8 @@ def run_search() -> tuple[list[dict], list[dict]]:
                 matches, err = check_workday(company)
             elif company["type"] == "smartrecruiters":
                 matches, err = check_smartrecruiters(company)
+            elif company["type"] == "neogov":
+                matches, err = check_neogov(company)
             elif company["type"] == "scrape":
                 matches, err = check_scrape(company)
             else:
@@ -572,6 +639,140 @@ def build_report(matches: list[dict], errors: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def build_pdf(matches: list[dict], errors: list[dict], manual: list[dict]) -> str:
+    filename = f"job_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    now      = datetime.now().strftime("%B %d, %Y")
+
+    doc = SimpleDocTemplate(
+        filename, pagesize=letter,
+        rightMargin=0.75*inch, leftMargin=0.75*inch,
+        topMargin=0.75*inch,   bottomMargin=0.75*inch,
+    )
+
+    def S(name, **kw):
+        base = getSampleStyleSheet()["Normal"]
+        return ParagraphStyle(name, parent=base, **kw)
+
+    title_s   = S("T",  fontSize=18, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=4)
+    sub_s     = S("Su", fontSize=10, alignment=TA_CENTER, textColor=colors.HexColor("#555555"), spaceAfter=2)
+    sec_s     = S("Se", fontSize=12, fontName="Helvetica-Bold", spaceBefore=14, spaceAfter=6, textColor=colors.HexColor("#1a1a1a"))
+    body_s    = S("B",  fontSize=9,  leading=14, spaceAfter=3)
+    num_s     = S("N",  fontSize=20, fontName="Helvetica-Bold", alignment=TA_CENTER, textColor=colors.HexColor("#2563eb"))
+    label_s   = S("L",  fontSize=8,  alignment=TA_CENTER, textColor=colors.HexColor("#555555"), spaceAfter=8)
+    note_s    = S("No", fontSize=8,  textColor=colors.HexColor("#b45309"), leftIndent=12, spaceAfter=4)
+    manual_s  = S("M",  fontSize=9,  leading=13, leftIndent=0, spaceAfter=2)
+    action_s  = S("A",  fontSize=9,  leading=14, leftIndent=12, spaceAfter=3)
+    step_s    = S("St", fontSize=10, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=4)
+
+    def HR(color="#dddddd", thickness=0.5, before=4, after=6):
+        return HRFlowable(width="100%", thickness=thickness,
+                          color=colors.HexColor(color),
+                          spaceBefore=before, spaceAfter=after)
+
+    story = []
+
+    # ── Header ───────────────────────────────────────────────────────────
+    story.append(Paragraph("Your Weekly Job Report", title_s))
+    story.append(Paragraph(f"Jose Castro  ·  {now}", sub_s))
+    story.append(Paragraph("Keywords: cybersecurity · IT analyst · automation · AI · GRC · SOC · Python", sub_s))
+    story.append(HR(color="#1a1a1a", thickness=1, before=6, after=10))
+
+    # ── Stats row ────────────────────────────────────────────────────────
+    stats = [
+        [Paragraph(str(len(matches)), num_s),
+         Paragraph(str(len(errors)),  num_s),
+         Paragraph(str(len(manual)),  num_s)],
+        [Paragraph("Jobs Found",      label_s),
+         Paragraph("Sites w/ Errors", label_s),
+         Paragraph("Manual Checks",   label_s)],
+    ]
+    t = Table(stats, colWidths=["33%", "34%", "33%"])
+    t.setStyle(TableStyle([
+        ("ALIGN",       (0,0), (-1,-1), "CENTER"),
+        ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("RIGHTPADDING",(0,0), (-1,-1), 0),
+        ("TOPPADDING",  (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+    ]))
+    story.append(t)
+    story.append(HR(before=10, after=4))
+
+    # ── Matched jobs ─────────────────────────────────────────────────────
+    if matches:
+        story.append(Paragraph("✅  Openings Found — Apply to These", sec_s))
+
+        by_company: dict[str, list] = {}
+        for m in matches:
+            by_company.setdefault(m["company"], []).append(m)
+
+        step = 1
+        for company_name, jobs in by_company.items():
+            hq = jobs[0]["hq"]
+            story.append(Paragraph(f"<b>{company_name}</b>  ·  {hq}", body_s))
+            for job in jobs:
+                link = job.get("link", "")
+                loc  = f" — {job['location']}" if job.get("location") else ""
+                title_text = job['title']
+
+                story.append(Paragraph(f"<b>Step {step}:</b>  {title_text}{loc}", step_s))
+                if link:
+                    story.append(Paragraph(f"→ Apply here: <a href='{link}' color='#2563eb'>{link}</a>", action_s))
+                if job.get("note"):
+                    story.append(Paragraph(f"⚠ {job['note']}", note_s))
+                step += 1
+            story.append(Spacer(1, 6))
+    else:
+        story.append(Paragraph("No direct matches found this week.", body_s))
+        story.append(Paragraph("Check the manual list below — jobs may be there but not parseable automatically.", body_s))
+
+    story.append(HR())
+
+    # ── Manual check list ────────────────────────────────────────────────
+    story.append(Paragraph("🔎  Check These Career Pages Manually", sec_s))
+    story.append(Paragraph(
+        "These sites either block automated scrapers or use JavaScript rendering. "
+        "Visit each link and search for: cybersecurity, IT analyst, automation, AI, GRC, SOC.",
+        body_s))
+    story.append(Spacer(1, 4))
+
+    for c in manual:
+        url = c.get("career_url", "")
+        story.append(Paragraph(
+            f"<b>{c['name']}</b>  ({c['hq']})  —  "
+            f"<a href='{url}' color='#2563eb'>{url}</a>",
+            manual_s))
+
+    story.append(HR())
+
+    # ── What to do ───────────────────────────────────────────────────────
+    story.append(Paragraph("📋  Action Checklist", sec_s))
+    actions = [
+        ("Apply", "Click every link in the 'Openings Found' section above and submit your resume."),
+        ("Manual check", "Visit each career page in the manual list and search the keywords above."),
+        ("Tailor your resume", "Before applying, drop the job link in Cowork and get a tailored resume built automatically."),
+        ("Follow up", "If you applied more than a week ago and heard nothing, email the recruiter or connect on LinkedIn."),
+        ("New cert goal", "Security+ — 2–3 months of study unlocks federal contractor roles you're currently blocked from."),
+    ]
+    for i, (label, text) in enumerate(actions, 1):
+        story.append(Paragraph(f"<b>{i}. {label}:</b>  {text}", body_s))
+
+    if errors:
+        story.append(HR())
+        story.append(Paragraph("⚠  Sites That Had Errors (no action needed)", sec_s))
+        story.append(Paragraph("These are technical issues with the agent — not job-related. They're logged here for reference.", body_s))
+        for e in errors:
+            story.append(Paragraph(f"• <b>{e['company']}</b>: {e['reason'][:120]}{'...' if len(e['reason']) > 120 else ''}", note_s))
+
+    try:
+        doc.build(story)
+        print(f"📄 PDF saved: {filename}")
+    except Exception as e:
+        print(f"❌ PDF generation failed: {e}")
+        return ""
+    return filename
+
+
 def save_report(report: str) -> str:
     filename = f"job_report_{datetime.now().strftime('%Y-%m-%d')}.md"
     try:
@@ -589,8 +790,13 @@ def save_report(report: str) -> str:
 
 if __name__ == "__main__":
     matches, errors = run_search()
-    report          = build_report(matches, errors)
+
+    # Markdown report
+    report = build_report(matches, errors)
     save_report(report)
+
+    # PDF report
+    build_pdf(matches, errors, COMPANIES)
 
     # Exit with error code if every company failed (useful for GitHub Actions alerts)
     if errors and not matches:
