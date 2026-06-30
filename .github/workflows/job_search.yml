@@ -1,0 +1,36 @@
+name: South FL Job Search Agent
+
+on:
+  schedule:
+    # Runs every Monday at 8:00 AM Eastern (12:00 UTC)
+    - cron: '0 12 * * 1'
+  workflow_dispatch: # Also lets you trigger it manually from GitHub
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run job search agent
+        run: python job_searcher.py
+
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-report-${{ github.run_number }}
+          path: job_report_*.md
+          retention-days: 30
+
+      - name: Print report to logs
+        run: cat job_report_*.md
