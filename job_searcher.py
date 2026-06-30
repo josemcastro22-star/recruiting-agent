@@ -11,6 +11,7 @@ Scheduled:    GitHub Actions runs this every Monday at 8am ET
 import requests
 import time
 import sys
+import json
 from datetime import datetime
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -46,45 +47,86 @@ RETRY_DELAY     = 5    # seconds between retries
 # ─── COMPANY REGISTRY ────────────────────────────────────────────────────────
 
 COMPANIES = [
-    # ── Greenhouse ────────────────────────────────────────────────────────
-    {"name": "Chewy",                    "hq": "Dania Beach, FL",      "type": "greenhouse", "slug": "chewy",                  "career_url": "https://careers.chewy.com"},
-    {"name": "Modernizing Medicine",     "hq": "Boca Raton, FL",       "type": "greenhouse", "slug": "moderninghealthcare",    "career_url": "https://www.modmed.com/company/careers/"},
-    {"name": "ADT Security",             "hq": "Boca Raton, FL",       "type": "greenhouse", "slug": "adt",                    "career_url": "https://careers.adt.com"},
-    {"name": "UKG",                      "hq": "Weston, FL",           "type": "greenhouse", "slug": "ukg",                    "career_url": "https://www.ukg.com/about-us/careers"},
-    # ── Lever ─────────────────────────────────────────────────────────────
-    {"name": "AutoNation",               "hq": "Fort Lauderdale, FL",  "type": "lever",      "slug": "autonation",             "career_url": "https://careers.autonation.com"},
-    {"name": "JM Family Enterprises",    "hq": "Deerfield Beach, FL",  "type": "lever",      "slug": "jmfamily",               "career_url": "https://www.jmfamily.com/careers/"},
-    {"name": "Citrix / Cloud Software",  "hq": "Fort Lauderdale, FL",  "type": "lever",      "slug": "cloud-software-group",   "career_url": "https://www.cloud.com/careers"},
-    # ── Direct scrape ─────────────────────────────────────────────────────
+    # ── Greenhouse (verified slugs) ───────────────────────────────────────
     {
-        "name": "Carnival Corporation",  "hq": "Doral, FL",            "type": "scrape",
-        "career_url":  "https://jobs.carnivalcorp.com",
-        "search_url":  "https://jobs.carnivalcorp.com/search/?q=cybersecurity+IT+security+analyst&locationsearch=florida",
+        "name": "Chewy",                 "hq": "Dania Beach, FL",
+        "type": "greenhouse",            "slug": "chewycom",
+        "career_url": "https://careers.chewy.com",
     },
     {
-        "name": "Office Depot / ODP",    "hq": "Boca Raton, FL",       "type": "scrape",
-        "career_url":  "https://jobs.officedepot.com",
-        "search_url":  "https://jobs.officedepot.com/search-jobs/cybersecurity%20IT%20analyst/Florida/0",
+        "name": "Modernizing Medicine",  "hq": "Boca Raton, FL",
+        "type": "greenhouse",            "slug": "modernizingmedicineinc",
+        "career_url": "https://www.modmed.com/company/careers/",
+    },
+    # ── Workday (POST API) ────────────────────────────────────────────────
+    {
+        "name": "AutoNation",            "hq": "Fort Lauderdale, FL",
+        "type": "workday",
+        "workday_tenant": "autonation",  "workday_instance": "wd5",
+        "workday_board": "Careers",
+        "career_url": "https://autonation.wd5.myworkdayjobs.com/Careers",
     },
     {
-        "name": "Broward County Gov",    "hq": "Fort Lauderdale, FL",  "type": "scrape",
-        "career_url":  "https://www.governmentjobs.com/careers/broward",
-        "search_url":  "https://www.governmentjobs.com/careers/broward?keywords=cybersecurity+IT+analyst",
+        "name": "JM Family Enterprises", "hq": "Deerfield Beach, FL",
+        "type": "workday",
+        "workday_tenant": "jm",          "workday_instance": "wd103",
+        "workday_board": "External",
+        "career_url": "https://jm.wd103.myworkdayjobs.com/External",
+    },
+    # ── SmartRecruiters ───────────────────────────────────────────────────
+    {
+        "name": "Citrix / Cloud Software Group", "hq": "Fort Lauderdale, FL",
+        "type": "smartrecruiters",       "slug": "Citrix1",
+        "career_url": "https://careers.cloud.com/",
+    },
+    # ── Scrape only ───────────────────────────────────────────────────────
+    {
+        "name": "ADT Security",          "hq": "Boca Raton, FL",
+        "type": "scrape",
+        "career_url": "https://jobs.adt.com",
+        "search_url": "https://jobs.adt.com/job-search-results/?keyword=cybersecurity+IT+analyst",
     },
     {
-        "name": "City of Fort Lauderdale","hq": "Fort Lauderdale, FL", "type": "scrape",
-        "career_url":  "https://www.governmentjobs.com/careers/ftlauderdale",
-        "search_url":  "https://www.governmentjobs.com/careers/ftlauderdale?keywords=cybersecurity+IT",
+        "name": "UKG",                   "hq": "Weston, FL",
+        "type": "scrape",
+        "career_url": "https://www.ukg.com/about-us/careers",
+        "search_url": "https://www.ukg.com/about-us/careers?q=cybersecurity+IT+analyst",
     },
     {
-        "name": "City of Boca Raton",    "hq": "Boca Raton, FL",       "type": "scrape",
-        "career_url":  "https://www.governmentjobs.com/careers/bocaraton",
-        "search_url":  "https://www.governmentjobs.com/careers/bocaraton?keywords=IT+analyst+cybersecurity",
+        "name": "Carnival Corporation",  "hq": "Doral, FL",
+        "type": "scrape",
+        "career_url": "https://jobs.carnivalcorp.com",
+        "search_url": "https://jobs.carnivalcorp.com/search-jobs?q=cybersecurity+IT+analyst",
     },
     {
-        "name": "Palm Beach County Gov", "hq": "West Palm Beach, FL",  "type": "scrape",
-        "career_url":  "https://www.governmentjobs.com/careers/palmbeach",
-        "search_url":  "https://www.governmentjobs.com/careers/palmbeach?keywords=cybersecurity+IT+analyst",
+        "name": "Office Depot / ODP",    "hq": "Boca Raton, FL",
+        "type": "scrape",
+        "career_url": "https://jobs.officedepot.com",
+        "search_url": "https://jobs.officedepot.com/search-jobs/cybersecurity%20IT%20analyst/Florida/0",
+    },
+    {
+        "name": "Broward County Gov",    "hq": "Fort Lauderdale, FL",
+        "type": "scrape",
+        "career_url": "https://www.governmentjobs.com/careers/broward",
+        "search_url": "https://www.governmentjobs.com/careers/broward?keywords=cybersecurity+IT+analyst",
+    },
+    {
+        "name": "City of Fort Lauderdale", "hq": "Fort Lauderdale, FL",
+        "type": "scrape",
+        "career_url": "https://www.governmentjobs.com/careers/ftlauderdale",
+        "search_url": "https://www.governmentjobs.com/careers/ftlauderdale?keywords=cybersecurity+IT",
+    },
+    {
+        "name": "City of Boca Raton",    "hq": "Boca Raton, FL",
+        "type": "scrape",
+        "career_url": "https://www.governmentjobs.com/careers/bocaraton",
+        "search_url": "https://www.governmentjobs.com/careers/bocaraton?keywords=IT+analyst+cybersecurity",
+    },
+    {
+        "name": "Palm Beach County Gov", "hq": "West Palm Beach, FL",
+        "type": "scrape",
+        "career_url": "https://www.governmentjobs.com/careers/palmbeach",
+        "search_url": "https://www.governmentjobs.com/careers/palmbeach?keywords=cybersecurity+IT+analyst",
     },
 ]
 
@@ -285,6 +327,121 @@ def check_lever(company: dict) -> tuple[list[dict], str | None]:
     return matches, None
 
 
+def check_workday(company: dict) -> tuple[list[dict], str | None]:
+    """
+    Query Workday's internal jobs API (POST).
+    URL pattern: https://{tenant}.wd{N}.myworkdayjobs.com/wday/cxs/{tenant}/{board}/jobs
+    """
+    tenant   = company["workday_tenant"]
+    instance = company["workday_instance"]
+    board    = company["workday_board"]
+    url      = f"https://{tenant}.{instance}.myworkdayjobs.com/wday/cxs/{tenant}/{board}/jobs"
+    print(f"  → Workday API ({tenant}.{instance})")
+
+    all_matches, seen, offset = [], set(), 0
+    limit = 20
+
+    while True:
+        payload = {"limit": limit, "offset": offset, "searchText": ""}
+        try:
+            r = requests.post(
+                url,
+                headers={**HEADERS, "Content-Type": "application/json"},
+                data=json.dumps(payload),
+                timeout=REQUEST_TIMEOUT,
+            )
+            if r.status_code == 404:
+                return [], f"HTTP 404 — check workday_tenant/board in COMPANIES list"
+            if r.status_code == 403:
+                return [], "HTTP 403 — Workday is blocking automated requests for this company"
+            if r.status_code >= 400:
+                return [], f"HTTP {r.status_code}"
+            data = safe_parse_json(r, url)
+        except requests.exceptions.Timeout:
+            return [], f"Timed out after {REQUEST_TIMEOUT}s"
+        except requests.exceptions.ConnectionError as e:
+            return [], f"Connection error: {e}"
+        except Exception as e:
+            return [], f"Unexpected error: {e}"
+
+        if data is None:
+            return [], "Response was not valid JSON"
+
+        job_postings = data.get("jobPostings", [])
+        if not isinstance(job_postings, list):
+            break
+
+        for job in job_postings:
+            if not isinstance(job, dict):
+                continue
+            title       = job.get("title", "")
+            location    = job.get("locationsText", "")
+            external_id = job.get("externalPath", "")
+            link        = f"{company['career_url'].rstrip('/')}{external_id}" if external_id else company["career_url"]
+
+            if not title:
+                continue
+            dedup_key = (title.lower(), location.lower())
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            if is_relevant(title, location):
+                all_matches.append(make_job(company, title, location, link))
+
+        # Paginate if there are more results
+        total = data.get("total", 0)
+        offset += limit
+        if offset >= total or not job_postings:
+            break
+
+    return all_matches, None
+
+
+def check_smartrecruiters(company: dict) -> tuple[list[dict], str | None]:
+    """Query SmartRecruiters public postings API."""
+    slug = company["slug"]
+    url  = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100"
+    print(f"  → SmartRecruiters API ({slug})")
+
+    try:
+        r    = fetch(url)
+        data = safe_parse_json(r, url)
+    except FetchError as e:
+        hint = " — Check slug in COMPANIES list." if "404" in str(e) else ""
+        return [], f"{e}{hint}"
+
+    if data is None:
+        return [], "Response was not valid JSON"
+
+    postings = data.get("content", [])
+    if not isinstance(postings, list):
+        return [], f"Unexpected response shape from SmartRecruiters"
+
+    matches, seen = [], set()
+    for job in postings:
+        if not isinstance(job, dict):
+            continue
+        title    = job.get("name", "")
+        location = job.get("location", {})
+        city     = location.get("city", "") if isinstance(location, dict) else ""
+        country  = location.get("country", "") if isinstance(location, dict) else ""
+        loc_str  = f"{city}, {country}".strip(", ")
+        link     = f"https://jobs.smartrecruiters.com/{slug}/{job.get('id', '')}"
+
+        if not title:
+            continue
+        dedup_key = (title.lower(), loc_str.lower())
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        if is_relevant(title, loc_str):
+            matches.append(make_job(company, title, loc_str, link))
+
+    return matches, None
+
+
 def check_scrape(company: dict) -> tuple[list[dict], str | None]:
     """
     Fetches search URL, looks for keyword hits in raw HTML.
@@ -331,6 +488,10 @@ def run_search() -> tuple[list[dict], list[dict]]:
                 matches, err = check_greenhouse(company)
             elif company["type"] == "lever":
                 matches, err = check_lever(company)
+            elif company["type"] == "workday":
+                matches, err = check_workday(company)
+            elif company["type"] == "smartrecruiters":
+                matches, err = check_smartrecruiters(company)
             elif company["type"] == "scrape":
                 matches, err = check_scrape(company)
             else:
